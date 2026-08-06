@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bean Identity - Admin Moderation Panel</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800;900&family=Poppins:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+
+<body>
+
+  <!-- AUTH GATE SCREEN -->
+  <div id="auth-gate" class="auth-gate-overlay">
+    <div class="auth-glow-bg"></div>
+    <div class="auth-gate-card">
+      <div class="auth-gate-header">
+        <span class="auth-brand">BEAN IDENTITY</span>
+        <h2>ADMIN PORTAL</h2>
+        <p>Please enter your pre-shared Administrator Secret Key to access the moderation systems.</p>
+      </div>
+
+      <form id="auth-form">
+        <div class="form-group">
+          <label for="admin-secret-input">SECRET ACCESS KEY</label>
+          <input type="password" id="admin-secret-input" required placeholder="•••••••••••••••••••••">
+        </div>
+        <div id="auth-error" class="auth-error-msg" style="display: none;">Invalid Access Key. Access Denied.</div>
+        <button type="submit" class="auth-submit-btn">AUTHORIZE ACCESS</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN ADMIN DASHBOARD -->
+  <div id="admin-panel" class="admin-dashboard-layout" style="display: none;">
+    <!-- LEFT SIDEBAR -->
+    <aside class="admin-sidebar">
+      <div class="sidebar-brand-wrapper">
+        <span class="sidebar-logo">BEAN IDENTITY</span>
+        <span class="sidebar-badge">ADMIN CONTROL</span>
+      </div>
+
+      <nav class="sidebar-menu">
+        <button type="button" class="menu-item active" data-tab="stories">
+          <svg viewBox="0 0 24 24" class="menu-icon">
+            <path
+              d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+          </svg>
+          <span>Bean Stories</span>
+        </button>
+
+        <button type="button" class="menu-item" data-tab="returns">
+          <svg viewBox="0 0 24 24" class="menu-icon">
+            <path
+              d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z" />
+          </svg>
+          <span>Returns & Exchanges</span>
+        </button>
+
+        <button type="button" class="menu-item" data-tab="sizes">
+          <svg viewBox="0 0 24 24" class="menu-icon">
+            <path
+              d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H3V8h18v8zM6 9h2v6H6zm10 0h2v6h-2z" />
+          </svg>
+          <span>Sizing Sync</span>
+        </button>
+
+        <button type="button" class="menu-item" data-tab="quiz">
+          <svg viewBox="0 0 24 24" class="menu-icon">
+            <path d="M5 9.2h3V19H5zM10.5 5h3v14h-3zm5.5 8h3v6h-3z" />
+          </svg>
+          <span>Quiz Analytics</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="admin-profile">
+          <div class="admin-avatar">A</div>
+          <div class="admin-meta">
+            <span class="admin-name">Root Admin</span>
+            <span class="admin-role">Superuser</span>
+          </div>
+        </div>
+        <button type="button" class="logout-btn" id="logout-button">
+          <svg viewBox="0 0 24 24" class="logout-icon">
+            <path
+              d="M16 17v-3H9v-4h7V7l5 5-5 5M14 2a2 2 0 0 0-2-2H2C.9 0 0 .9 0 2v20a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4h-2v4H2V2h10v4h2V2z" />
+          </svg>
+          <span>LOG OUT</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- MAIN PANEL VIEWPORT -->
+    <main class="admin-main-content">
+
+      <!-- MODULE A: BEAN STORIES MODERATION -->
+      <section id="tab-stories" class="tab-view active">
+        <div class="view-header">
+          <div>
+            <h1>BEAN STORIES MODERATION</h1>
+            <p>Review customer identity stories, styles, and media submissions before they go live on the homepage
+              carousel queue.</p>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metric-card">
+              <span class="metric-num" id="stories-pending-badge">0</span>
+              <span class="metric-lbl">Pending Review</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-num" id="stories-approved-badge">0</span>
+              <span class="metric-lbl">Active Approved</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stories Module Navigation Tabs -->
+        <div class="module-nav-tabs">
+          <button type="button" class="sub-tab active" data-subtab="pending">
+            Pending Queue <span class="sub-tab-badge" id="badge-pending-count">0</span>
+          </button>
+          <button type="button" class="sub-tab" data-subtab="approved">
+            Approved <span class="sub-tab-badge" id="badge-approved-count">0</span>
+          </button>
+          <button type="button" class="sub-tab" data-subtab="rejected">
+            Rejected <span class="sub-tab-badge" id="badge-rejected-count">0</span>
+          </button>
+        </div>
+
+        <!-- Dynamic Stories Cards Grid -->
+        <div id="stories-grid" class="cards-grid">
+          <!-- Story items rendered dynamically -->
+          <div class="loading-state">
+            <div class="skeleton-loader">
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MODULE B: RETURNS & EXCHANGES (Placeholder) -->
+      <section id="tab-returns" class="tab-view">
+        <div class="view-header">
+          <div>
+            <h1>RETURNS & EXCHANGES PORTAL</h1>
+            <p>Moderation console for order return processing, automated 5-day delivery window checks, and media
+              compliance audits.</p>
+          </div>
+        </div>
+
+        <div class="placeholder-module-card">
+          <div class="placeholder-graphic">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z" />
+            </svg>
+          </div>
+          <h3>Returns Management is Coming Soon</h3>
+          <p>This module will load all customer returns, inspect uploaded tags and tags quality images, audit returns
+            delivery dates, and initiate reshipping size exchanges.</p>
+          <button type="button" class="placeholder-action-btn">Request Integration Scope</button>
+        </div>
+      </section>
+
+      <!-- MODULE C: SIZING SYNC (Placeholder) -->
+      <section id="tab-sizes" class="tab-view">
+        <div class="view-header">
+          <div>
+            <h1>SHOPIFY SIZING SYNC MODULE</h1>
+            <p>Manage real-time inventory quantity filters and dynamically sync sizes directly with the Shopify backend
+              API.</p>
+          </div>
+        </div>
+
+        <div class="placeholder-module-card">
+          <div class="placeholder-graphic">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H3V8h18v8zM6 9h2v6H6zm10 0h2v6h-2z" />
+            </svg>
+          </div>
+          <h3>Sizing Synchronizer is Coming Soon</h3>
+          <p>This interface will query Shopify variants, audit sizing availability in real-time, and allow admins to
+            toggle size options in frontend return forms dynamically.</p>
+          <button type="button" class="placeholder-action-btn">Initialize Connection Settings</button>
+        </div>
+      </section>
+
+      <!-- MODULE D: QUIZ ANALYTICS -->
+      <section id="tab-quiz" class="tab-view">
+        <div class="view-header">
+          <div>
+            <h1>QUIZ ANALYTICS</h1>
+            <p>Real-time completion tracking, drop-off analysis, archetype distribution, and participant details.</p>
+          </div>
+        </div>
+
+        <!-- Top Metrics Row -->
+        <div class="analytics-metrics-row">
+          <div class="analytics-metric-card">
+            <span class="metric-num" id="quiz-total-views">0</span>
+            <span class="metric-lbl">Total Views</span>
+          </div>
+          <div class="analytics-metric-card">
+            <span class="metric-num" id="quiz-link-clicks">0</span>
+            <span class="metric-lbl">Link Clicks</span>
+          </div>
+          <div class="analytics-metric-card">
+            <span class="metric-num" id="quiz-completions">0</span>
+            <span class="metric-lbl">Completions</span>
+          </div>
+          <div class="analytics-metric-card completion-rate-card">
+            <div class="progress-ring-container">
+              <svg class="progress-ring" width="56" height="56">
+                <circle class="progress-ring__circle-bg" stroke="rgba(255,255,255,0.06)" stroke-width="4.5"
+                  fill="transparent" r="24" cx="28" cy="28" />
+                <circle class="progress-ring__circle" id="completion-progress-ring" stroke="#C6A969" stroke-width="4.5"
+                  fill="transparent" r="24" cx="28" cy="28" stroke-dasharray="150.8" stroke-dashoffset="150.8" />
+              </svg>
+              <span class="metric-num" id="quiz-completion-rate">0%</span>
+            </div>
+            <span class="metric-lbl">Completion Rate</span>
+          </div>
+        </div>
+
+        <!-- Analytics Body Dashboard Grid -->
+        <div class="analytics-dashboard-grid">
+
+          <!-- Funnel section -->
+          <div class="analytics-card funnel-card">
+            <h2 class="analytics-section-title">PARTICIPATION FUNNEL</h2>
+            <div id="funnel-container" class="funnel-container">
+              <!-- Render funnel bars here dynamically -->
+              <div class="skeleton-loader">
+                <div class="skeleton-bar"></div>
+                <div class="skeleton-bar"></div>
+                <div class="skeleton-bar"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Outcomes distribution section -->
+          <div class="analytics-card outcomes-card">
+            <h2 class="analytics-section-title">BEAN TYPE OUTCOMES</h2>
+            <div class="outcomes-layout">
+              <div class="outcomes-chart-col">
+                <div class="donut-chart-wrapper">
+                  <svg id="donut-chart" viewBox="0 0 100 100" width="180" height="180"></svg>
+                  <div class="donut-chart-center">
+                    <span id="donut-total-completions" class="total-completions-count">0</span>
+                    <span class="total-completions-lbl">Completions</span>
+                  </div>
+                </div>
+              </div>
+              <div class="outcomes-list-col">
+                <ul id="outcomes-list" class="outcomes-list">
+                  <!-- Dynamically populated list -->
+                </ul>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Participants section -->
+        <div class="analytics-card table-card">
+          <div class="section-header-row">
+            <h2 class="analytics-section-title">PARTICIPANTS</h2>
+            <div class="search-wrapper">
+              <svg viewBox="0 0 24 24" class="search-icon">
+                <path
+                  d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+              </svg>
+              <input type="text" id="participants-search" placeholder="Search by name or email...">
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="participants-table">
+              <thead>
+                <tr>
+                  <th>PARTICIPANT</th>
+                  <th>EMAIL</th>
+                  <th>FURTHEST STEP</th>
+                  <th>WINNING MATCH</th>
+                  <th>LAST ACTIVITY</th>
+                </tr>
+              </thead>
+              <tbody id="participants-tbody">
+                <!-- Dynamically rendered rows -->
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-footer">
+            <button type="button" id="load-more-participants-btn" class="load-more-btn" style="display: none;">LOAD
+              MORE</button>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Core Dashboard JS Script -->
+  <script src="admin.js"></script>
+</body>
+
+</html>

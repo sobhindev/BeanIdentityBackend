@@ -1,0 +1,634 @@
+// src/controllers/admin/googleDriveController.js
+const sql = require('mssql');
+const { google } = require('googleapis');
+
+/**
+ * Helper: Load Google OAuth2 credentials from Environment Variables
+ */
+async function loadOAuthCredentials() {
+  const configMap = {
+    google_client_id: process.env.GOOGLE_CLIENT_ID,
+    google_client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    google_redirect_uri: process.env.GOOGLE_REDIRECT_URI
+  };
+  return configMap;
+}
+
+/**
+ * Helper: Build an authenticated OAuth2 client for a user.
+ * Automatically refreshes access token if expired and updates DB.
+ */
+async function buildAuthClient(pool, userUUID) {
+  // Load OAuth app credentials
+  const creds = await loadOAuthCredentials();
+  if (!creds.google_client_id || !creds.google_client_secret || !creds.google_redirect_uri) {
+    throw new Error('Google OAuth credentials not configured in Application Configure.');
+  }
+
+  // Load user tokens from DB (decrypt refresh token)
+  const tokenResult = await pool.request()
+    .input('User_UUID', sql.VarChar(50), userUUID)
+    .query(`
+      OPEN SYMMETRIC KEY SensitiveDataKey DECRYPTION BY CERTIFICATE SensitiveDataCert;
+
+      SELECT
+        Google_Access_Token,
+        CAST(DecryptByKey(Google_Refresh_Token) AS NVARCHAR(MAX)) AS Google_Refresh_Token,
+        Google_Token_Expiry,
+        Google_Drive_Email
+      FROM dbo.User_Subscription
+      WHERE User_UUID = @User_UUID;
+
+      CLOSE SYMMETRIC KEY SensitiveDataKey;
+    `);
+
+  const tokenRow = tokenResult.recordset[0];
+
+  if (!tokenRow || !tokenRow.Google_Refresh_Token) {
+    throw new Error('Google Drive is not linked. Please connect your Google account first.');
+  }
+
+  const oauth2Client = new google.auth.OAuth2(
+    creds.google_client_id,
+    creds.google_client_secret,
+    creds.google_redirect_uri
+  );
+
+  oauth2Client.setCredentials({
+    access_token: tokenRow.Google_Access_Token,
+    refresh_token: tokenRow.Google_Refresh_Token,
+    expiry_date: tokenRow.Google_Token_Expiry ? new Date(tokenRow.Google_Token_Expiry).getTime() : null
+  });
+
+  // Auto-refresh listener: update DB when token is refreshed
+  oauth2Client.on('tokens', async (tokens) => {
+    try {
+      if (tokens.access_token) {
+        await pool.request()
+          .input('User_UUID', sql.VarChar(50), userUUID)
+          .input('Access_Token', sql.VarChar(sql.MAX), tokens.access_token)
+          .input('Expiry', sql.DateTime, tokens.expiry_date ? new Date(tokens.expiry_date) : null)
+          .query(`
+            UPDATE dbo.User_Subscription
+            SET Google_Access_Token = @Access_Token,
+                Google_Token_Expiry = @Expiry
+            WHERE User_UUID = @User_UUID
+          `);
+      }
+    } catch (e) {
+      console.error('Failed to update refreshed token in DB:', e.message);
+    }
+  });
+
+  return oauth2Client;
+}
+
+/**
+ * Helper: Get or create the "iSure Documents" folder in user's Drive.
+ */
+async function getOrCreateIsureFolder(drive, agentName) {
+  const ROOT_FOLDER_NAME = 'iSure Documents';
+
+  // Search for existing root folder
+  let rootFolderId;
+  const rootSearch = await drive.files.list({
+    q: `name = '${ROOT_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id, name)',
+    spaces: 'drive'
+  });
+
+  if (rootSearch.data.files && rootSearch.data.files.length > 0) {
+    rootFolderId = rootSearch.data.files[0].id;
+  } else {
+    // Create root folder
+    const rootFolder = await drive.files.create({
+      requestBody: {
+        name: ROOT_FOLDER_NAME,
+        mimeType: 'application/vnd.google-apps.folder'
+      },
+      fields: 'id'
+    });
+    rootFolderId = rootFolder.data.id;
+  }
+
+  if (!agentName) return rootFolderId;
+
+  // Search for agent subfolder
+  let agentFolderId;
+  const agentSearch = await drive.files.list({
+    q: `'${rootFolderId}' in parents and name = '${agentName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id, name)',
+    spaces: 'drive'
+  });
+
+  if (agentSearch.data.files && agentSearch.data.files.length > 0) {
+    agentFolderId = agentSearch.data.files[0].id;
+  } else {
+    // Create agent folder
+    const agentFolder = await drive.files.create({
+      requestBody: {
+        name: agentName,
+        parents: [rootFolderId],
+        mimeType: 'application/vnd.google-apps.folder'
+      },
+      fields: 'id'
+    });
+    agentFolderId = agentFolder.data.id;
+  }
+
+  return agentFolderId;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC ROUTE — Google OAuth Callback
+// GET /api/admin/google/callback?code=...&state=<userUUID>
+// ─────────────────────────────────────────────────────────────────────────────
+const googleAuthCallback = async (req, res) => {
+  let pool;
+  try {
+    const { code, state: userUUID, error } = req.query;
+
+    if (error) {
+      console.error('Google OAuth error:', error);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      return res.redirect(`${frontendUrl}/application-configure?drive=error&reason=${encodeURIComponent(error)}`);
+    }
+
+    if (!code || !userUUID) {
+      return res.status(400).json({ success: false, message: 'Missing code or state parameter' });
+    }
+
+    pool = await connectDB();
+
+    // Load OAuth app credentials
+    const creds = await loadOAuthCredentials();
+    if (!creds.google_client_id || !creds.google_client_secret || !creds.google_redirect_uri) {
+      return res.status(400).json({ success: false, message: 'OAuth credentials not configured' });
+    }
+
+    const oauth2Client = new google.auth.OAuth2(
+      creds.google_client_id,
+      creds.google_client_secret,
+      creds.google_redirect_uri
+    );
+
+    // Exchange code for tokens
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    // Fetch user's Google email
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const userInfo = await oauth2.userinfo.get();
+    const driveEmail = userInfo.data.email;
+
+    // Save tokens to DB (refresh token encrypted)
+    await pool.request()
+      .input('User_UUID', sql.VarChar(50), userUUID)
+      .input('Access_Token', sql.VarChar(sql.MAX), tokens.access_token || null)
+      .input('Refresh_Token_Plain', sql.NVarChar(sql.MAX), tokens.refresh_token || null)
+      .input('Expiry', sql.DateTime, tokens.expiry_date ? new Date(tokens.expiry_date) : null)
+      .input('Drive_Email', sql.VarChar(150), driveEmail)
+      .query(`
+        OPEN SYMMETRIC KEY SensitiveDataKey DECRYPTION BY CERTIFICATE SensitiveDataCert;
+
+        UPDATE dbo.User_Subscription
+        SET Google_Access_Token  = @Access_Token,
+            Google_Refresh_Token = CASE 
+              WHEN @Refresh_Token_Plain IS NOT NULL 
+              THEN EncryptByKey(Key_GUID('SensitiveDataKey'), @Refresh_Token_Plain)
+              ELSE Google_Refresh_Token  -- keep existing if no new refresh token returned
+            END,
+            Google_Token_Expiry  = @Expiry,
+            Google_Drive_Email   = @Drive_Email
+        WHERE User_UUID = @User_UUID;
+
+        CLOSE SYMMETRIC KEY SensitiveDataKey;
+      `);
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    return res.redirect(`${frontendUrl}/application-configure?drive=linked`);
+
+  } catch (err) {
+    console.error('googleAuthCallback error:', err);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    return res.redirect(`${frontendUrl}/application-configure?drive=error&reason=${encodeURIComponent(err.message)}`);
+  } finally {
+    if (pool) await pool.close();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/google/drive-info
+// Returns linked Drive email + storage quota
+// ─────────────────────────────────────────────────────────────────────────────
+const getDriveInfo = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const pool = await connectDB();
+
+    // First check if Drive is linked at all (quick DB check, no API call)
+    const check = await pool.request()
+      .input('User_UUID', sql.VarChar(50), userUUID)
+      .query(`
+        SELECT Google_Drive_Email, Google_Token_Expiry
+        FROM dbo.User_Subscription
+        WHERE User_UUID = @User_UUID
+      `);
+
+    const row = check.recordset[0];
+    if (!row || !row.Google_Drive_Email) {
+      return res.json({
+        success: true,
+        data: { isLinked: false, email: null, usedMB: null, totalGB: null }
+      });
+    }
+
+    // Build auth client and call Drive API for quota
+    const auth = await buildAuthClient(pool, userUUID);
+    const drive = google.drive({ version: 'v3', auth });
+
+    const about = await drive.about.get({ fields: 'storageQuota, user' });
+    const quota = about.data.storageQuota;
+
+    const usedMB = quota.usage ? (parseInt(quota.usage) / (1024 * 1024)).toFixed(1) : 0;
+    const totalGB = quota.limit ? (parseInt(quota.limit) / (1024 * 1024 * 1024)).toFixed(0) : 'Unlimited';
+
+    return res.json({
+      success: true,
+      data: {
+        isLinked: true,
+        email: row.Google_Drive_Email,
+        usedMB: parseFloat(usedMB),
+        totalGB: totalGB === 'Unlimited' ? totalGB : parseInt(totalGB),
+        displayText: `${usedMB} MB out of ${totalGB} GB`
+      }
+    });
+
+  } catch (err) {
+    console.error('getDriveInfo error:', err);
+    // If token is invalid or lacks scopes, return not-linked state instead of 500
+    if (err.message.includes('not linked') || err.code === 401 || err.code === 403) {
+      return res.json({
+        success: true,
+        data: { isLinked: false, email: null, usedMB: null, totalGB: null, authError: err.message }
+      });
+    }
+    return res.status(500).json({ success: false, message: 'Failed to get Drive info', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/google/regenerate-token
+// Force-refresh the access token
+// ─────────────────────────────────────────────────────────────────────────────
+const regenerateDriveToken = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const pool = await connectDB();
+
+    const auth = await buildAuthClient(pool, userUUID);
+    // Force refresh by clearing access_token expiry
+    auth.credentials.expiry_date = 0;
+    await auth.getAccessToken(); // triggers token refresh and the 'tokens' event updates DB
+
+    return res.json({ success: true, message: 'Google Drive token regenerated successfully' });
+  } catch (err) {
+    console.error('regenerateDriveToken error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to regenerate token', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/documents/drive/upload
+// Uploads a file (from multer memoryStorage) to user's Google Drive
+// ─────────────────────────────────────────────────────────────────────────────
+const uploadToDrive = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file provided' });
+    }
+
+    const pool = await connectDB();
+    const auth = await buildAuthClient(pool, userUUID);
+    const drive = google.drive({ version: 'v3', auth });
+
+    // Get or create "iSure Documents" folder
+    const agentName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || `Agent_${userUUID}`;
+    const folderId = await getOrCreateIsureFolder(drive, agentName);
+
+    // Convert buffer to readable stream
+    const { Readable } = require('stream');
+    const stream = new Readable();
+    stream.push(req.file.buffer);
+    stream.push(null);
+
+    // Upload to Drive
+    const response = await drive.files.create({
+      requestBody: {
+        name: req.file.originalname,
+        parents: [folderId]
+      },
+      media: {
+        mimeType: req.file.mimetype,
+        body: stream
+      },
+      fields: 'id, name, size, mimeType, createdTime, webViewLink, webContentLink'
+    });
+
+    const file = response.data;
+
+    return res.json({
+      success: true,
+      message: 'File uploaded to Google Drive successfully',
+      data: {
+        fileId: file.id,
+        fileName: file.name,
+        size: file.size,
+        mimeType: file.mimeType,
+        createdTime: file.createdTime,
+        webViewLink: file.webViewLink,
+        webContentLink: file.webContentLink
+      }
+    });
+
+  } catch (err) {
+    console.error('uploadToDrive error:', err);
+    return res.status(500).json({ success: false, message: 'Upload failed', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/documents/drive/list
+// Lists files in the "iSure Documents" folder on user's Drive
+// ─────────────────────────────────────────────────────────────────────────────
+const listDriveFiles = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const pool = await connectDB();
+
+    const auth = await buildAuthClient(pool, userUUID);
+    const drive = google.drive({ version: 'v3', auth });
+
+    const agentName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || `Agent_${userUUID}`;
+    const folderId = await getOrCreateIsureFolder(drive, agentName);
+
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'files(id, name, size, mimeType, createdTime, modifiedTime, webViewLink, webContentLink, iconLink)',
+      orderBy: 'modifiedTime desc',
+      pageSize: 100
+    });
+
+    const files = (response.data.files || []).map(f => ({
+      fileId: f.id,
+      name: f.name,
+      size: f.size ? parseInt(f.size) : 0,
+      sizeMB: f.size ? (parseInt(f.size) / (1024 * 1024)).toFixed(2) : '0.00',
+      mimeType: f.mimeType,
+      createdTime: f.createdTime,
+      modifiedTime: f.modifiedTime,
+      webViewLink: f.webViewLink,
+      webContentLink: f.webContentLink,
+      iconLink: f.iconLink
+    }));
+
+    return res.json({ success: true, data: files, total: files.length });
+
+  } catch (err) {
+    console.error('listDriveFiles error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to list files', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/admin/documents/drive/:fileId
+// Moves a file to trash in Google Drive
+// ─────────────────────────────────────────────────────────────────────────────
+const deleteDriveFile = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const { fileId } = req.params;
+
+    if (!fileId) {
+      return res.status(400).json({ success: false, message: 'File ID is required' });
+    }
+
+    const pool = await connectDB();
+    const auth = await buildAuthClient(pool, userUUID);
+    const drive = google.drive({ version: 'v3', auth });
+
+    // Trash (soft delete) instead of permanent delete
+    await drive.files.update({
+      fileId,
+      requestBody: { trashed: true }
+    });
+
+    return res.json({ success: true, message: 'File removed successfully' });
+
+  } catch (err) {
+    console.error('deleteDriveFile error:', err);
+    return res.status(500).json({ success: false, message: 'Delete failed', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/documents/drive/download/:fileId
+// Streams a file from Google Drive back to the client
+// ─────────────────────────────────────────────────────────────────────────────
+const downloadDriveFile = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const { fileId } = req.params;
+
+    if (!fileId) {
+      return res.status(400).json({ success: false, message: 'File ID is required' });
+    }
+
+    const pool = await connectDB();
+    const auth = await buildAuthClient(pool, userUUID);
+    const drive = google.drive({ version: 'v3', auth });
+
+    // Get file metadata first for the filename + mime type
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'name, mimeType'
+    });
+
+    const fileName = meta.data.name;
+    const mimeType = meta.data.mimeType;
+
+    // Skip download for Google Workspace files (Docs, Sheets, etc.)
+    if (mimeType && mimeType.startsWith('application/vnd.google-apps')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot download Google Workspace files directly. Please use webViewLink to open in Google Drive.'
+      });
+    }
+
+    // Stream file content
+    const fileStream = await drive.files.get(
+      { fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.setHeader('Content-Type', mimeType || 'application/octet-stream');
+
+    fileStream.data
+      .on('error', (err) => {
+        console.error('Drive stream error:', err);
+        if (!res.headersSent) res.status(500).end();
+      })
+      .pipe(res);
+
+  } catch (err) {
+    console.error('downloadDriveFile error:', err);
+    return res.status(500).json({ success: false, message: 'Download failed', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/google/drive-image/:id
+// Proxies a Google Drive image to the frontend to bypass CORS/403 restrictions
+// This route must be PUBLIC because <img> tags do not send Authorization headers.
+// ─────────────────────────────────────────────────────────────────────────────
+const streamDriveImage = async (req, res) => {
+  const fileId = req.params.id;
+
+  if (!fileId) {
+    return res.status(400).send('Missing fileId');
+  }
+
+  // Set caching and CORS headers
+  res.setHeader('Cache-Control', 'public, max-age=31536000');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  try {
+    const pool = await connectDB();
+    
+    // 1. Find which user owns the theme with this fileId
+    const themeRes = await pool.request()
+      .input('FileId', sql.VarChar(200), `%${fileId}%`)
+      .query(`
+        SELECT TOP 1 User_UUID FROM dbo.ThemeMaster
+        WHERE LogoPath LIKE @FileId OR LetterheadPath LIKE @FileId
+      `);
+    
+    let userUUID = themeRes.recordset?.[0]?.User_UUID;
+
+    // Fallback: Find the first user who has Google Drive linked
+    if (!userUUID) {
+      const fallbackRes = await pool.request().query(`
+        SELECT TOP 1 User_UUID FROM dbo.User_Subscription
+        WHERE Google_Access_Token IS NOT NULL OR Google_Refresh_Token IS NOT NULL
+      `);
+      userUUID = fallbackRes.recordset?.[0]?.User_UUID;
+    }
+
+    if (userUUID) {
+      // 2. Build authenticated client
+      const auth = await buildAuthClient(pool, userUUID);
+      const drive = google.drive({ version: 'v3', auth });
+
+      // 3. Get metadata for content-type
+      const meta = await drive.files.get({
+        fileId,
+        fields: 'mimeType'
+      }).catch(() => null);
+
+      if (meta && meta.data.mimeType) {
+        res.setHeader('Content-Type', meta.data.mimeType);
+      }
+
+      // 4. Stream file content directly
+      const fileStream = await drive.files.get(
+        { fileId, alt: 'media' },
+        { responseType: 'stream' }
+      );
+
+      fileStream.data
+        .on('error', (streamErr) => {
+          console.error('streamDriveImage API stream error:', streamErr.message);
+          if (!res.headersSent) res.status(500).send('Stream failed');
+        })
+        .pipe(res);
+      
+      return; // Success, done!
+    }
+  } catch (apiErr) {
+    console.warn('streamDriveImage API optimization failed, falling back to public fetch:', apiErr.message);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Fallback: Public web-based fetch (original slow method)
+  // ───────────────────────────────────────────────────────────────────────────
+  try {
+    const driveUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
+    const response = await fetch(driveUrl);
+
+    if (!response.ok) {
+      return res.status(response.status).send('Image not found or inaccessible');
+    }
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+      res.end();
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    console.error('streamDriveImage fallback error:', err.message);
+    if (!res.headersSent) res.status(500).send('Internal Server Error');
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/google/disconnect-drive
+// Clears Google Drive tokens and email in database
+// ─────────────────────────────────────────────────────────────────────────────
+const disconnectDrive = async (req, res) => {
+  try {
+    const userUUID = req.user.uuid;
+    const pool = await connectDB();
+
+    await pool.request()
+      .input('User_UUID', sql.VarChar(50), userUUID)
+      .query(`
+        UPDATE dbo.User_Subscription
+        SET Google_Access_Token = NULL,
+            Google_Refresh_Token = NULL,
+            Google_Token_Expiry = NULL,
+            Google_Drive_Email = NULL
+        WHERE User_UUID = @User_UUID
+      `);
+
+    return res.json({ success: true, message: 'Google Drive unlinked successfully' });
+  } catch (err) {
+    console.error('disconnectDrive error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to unlink Google Drive', error: err.message });
+  }
+};
+
+module.exports = {
+  googleAuthCallback,
+  getDriveInfo,
+  regenerateDriveToken,
+  uploadToDrive,
+  listDriveFiles,
+  deleteDriveFile,
+  downloadDriveFile,
+  streamDriveImage,
+  buildAuthClient,
+  getOrCreateIsureFolder,
+  disconnectDrive
+};
