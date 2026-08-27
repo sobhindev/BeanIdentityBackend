@@ -100,6 +100,92 @@ async function createOrUpdateCustomer(email, name, tagsToAppend = []) {
   }
 }
 
+/**
+ * Looks up a Shopify order by its order number (e.g. "1023" or "#1023") and verifies
+ * that the supplied email matches the order's contact email. Used by the returns/exchange
+ * flow so customers can't submit a return against an order that isn't theirs, and so the
+ * 5-day return window is measured against Shopify's own fulfillment date instead of a
+ * hand-typed delivery date.
+ *
+ * Requires the custom app to have the `read_orders` scope, and (on stores where Shopify's
+ * protected customer data approval applies) approval to access customer email/name via the
+ * Admin API — see Shopify Admin > Settings > Apps > [your app] > API access.
+ *
+ * @param {string|number} orderNumber - Order number as entered by the customer.
+ * @param {string} email - Email the customer entered, checked against the order's email.
+ * @returns {Promise<null|{mismatch:true}|object>} null when no order is found, {mismatch:true}
+ *   when the order exists but the email doesn't match, otherwise the resolved order details.
+ */
+async function findOrderByNameAndEmail(orderNumber, email) {
+  const shop = process.env.SHOPIFY_SHOP || "beanspot-2";
+  const token = await getShopifyToken();
+
+  const cleanNumber = String(orderNumber || "").trim().replace(/^#/, "");
+  if (!cleanNumber) return null;
+  const name = `#${cleanNumber}`;
+
+  const url = `https://${shop}.myshopify.com/admin/api/2024-01/orders.json?name=${encodeURIComponent(name)}&status=any`;
+  const response = await axios.get(url, {
+    headers: {
+      "X-Shopify-Access-Token": token,
+      "Accept": "application/json",
+    },
+  });
+
+  const orders = response.data.orders || [];
+  if (orders.length === 0) return null;
+
+  const order = orders[0];
+  const orderEmail = (order.email || order.contact_email || "").trim().toLowerCase();
+  const suppliedEmail = (email || "").trim().toLowerCase();
+
+  if (!orderEmail || orderEmail !== suppliedEmail) {
+    return { mismatch: true };
+  }
+
+  // Prefer the most recent fulfillment date as the "delivered" reference; fall back to order creation.
+  let fulfillmentDate = null;
+  if (Array.isArray(order.fulfillments) && order.fulfillments.length > 0) {
+    const dates = order.fulfillments
+      .map((f) => new Date(f.created_at))
+      .filter((d) => !isNaN(d.getTime()));
+    if (dates.length > 0) {
+      fulfillmentDate = new Date(Math.max(...dates.map((d) => d.getTime())));
+    }
+  }
+
+  let customerName = "";
+  if (order.customer) {
+    customerName = [order.customer.first_name, order.customer.last_name].filter(Boolean).join(" ").trim();
+  }
+  if (!customerName && order.shipping_address && order.shipping_address.name) {
+    customerName = order.shipping_address.name;
+  }
+
+  const lineItems = (order.line_items || []).map((li) => ({
+    lineItemId: String(li.id),
+    productId: li.product_id ? String(li.product_id) : null,
+    variantId: li.variant_id ? String(li.variant_id) : null,
+    title: li.title,
+    variantTitle: li.variant_title,
+    quantity: li.quantity,
+    sku: li.sku,
+  }));
+
+  return {
+    mismatch: false,
+    orderId: String(order.id),
+    orderName: order.name,
+    customerName,
+    financialStatus: order.financial_status,
+    fulfillmentStatus: order.fulfillment_status,
+    fulfillmentDate: fulfillmentDate ? fulfillmentDate.toISOString() : null,
+    createdAt: order.created_at,
+    lineItems,
+  };
+}
+
 module.exports = {
-  createOrUpdateCustomer
+  createOrUpdateCustomer,
+  findOrderByNameAndEmail,
 };

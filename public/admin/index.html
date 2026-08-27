@@ -147,27 +147,94 @@
         </div>
       </section>
 
-      <!-- MODULE B: RETURNS & EXCHANGES (Placeholder) -->
+      <!-- MODULE B: RETURNS & EXCHANGES -->
       <section id="tab-returns" class="tab-view">
         <div class="view-header">
           <div>
             <h1>RETURNS & EXCHANGES PORTAL</h1>
-            <p>Moderation console for order return processing, automated 5-day delivery window checks, and media
-              compliance audits.</p>
+            <p>Review customer return and exchange requests, inspect media evidence, verify the 5-day delivery
+              window, and approve or reject.</p>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metric-card">
+              <span class="metric-num" id="returns-pending-badge">0</span>
+              <span class="metric-lbl">Pending Review</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-num" id="returns-approved-badge">0</span>
+              <span class="metric-lbl">Approved</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-num" id="returns-rejected-badge">0</span>
+              <span class="metric-lbl">Rejected</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-num" id="returns-exchange-badge">0</span>
+              <span class="metric-lbl">Exchange Requests</span>
+            </div>
           </div>
         </div>
 
-        <div class="placeholder-module-card">
-          <div class="placeholder-graphic">
-            <svg viewBox="0 0 24 24">
-              <path
-                d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z" />
-            </svg>
+        <!-- Filter Bar -->
+        <div class="returns-filter-bar">
+          <div class="filter-field">
+            <label for="returns-filter-status">STATUS</label>
+            <select id="returns-filter-status">
+              <option value="">All Statuses</option>
+              <option value="pending_review">Pending Review</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="refund_initiated">Refund Initiated</option>
+              <option value="completed">Completed</option>
+            </select>
           </div>
-          <h3>Returns Management is Coming Soon</h3>
-          <p>This module will load all customer returns, inspect uploaded tags and tags quality images, audit returns
-            delivery dates, and initiate reshipping size exchanges.</p>
-          <button type="button" class="placeholder-action-btn">Request Integration Scope</button>
+          <div class="filter-field">
+            <label for="returns-filter-type">TYPE</label>
+            <select id="returns-filter-type">
+              <option value="">Returns & Exchanges</option>
+              <option value="return">Return Only</option>
+              <option value="exchange">Exchange Only</option>
+            </select>
+          </div>
+          <div class="filter-field grow">
+            <label for="returns-filter-orderid">ORDER ID</label>
+            <input type="text" id="returns-filter-orderid" placeholder="Search by order ID...">
+          </div>
+          <button type="button" class="load-more-btn" id="returns-refresh-btn" style="display:block;">REFRESH</button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="participants-table returns-table">
+            <thead>
+              <tr>
+                <th>REQUEST</th>
+                <th>ORDER</th>
+                <th>CUSTOMER</th>
+                <th>TYPE</th>
+                <th>REASON</th>
+                <th>SUBMITTED</th>
+                <th>STATUS</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="returns-tbody">
+              <tr>
+                <td colspan="8" style="text-align: center; padding: 48px;">
+                  <div class="skeleton-loader">
+                    <div class="skeleton-bar"></div>
+                    <div class="skeleton-bar"></div>
+                    <div class="skeleton-bar"></div>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination-footer">
+          <button type="button" id="returns-load-more-btn" class="load-more-btn" style="display: none;">LOAD
+            MORE</button>
         </div>
       </section>
 
@@ -310,6 +377,16 @@
       </section>
 
     </main>
+  </div>
+
+  <!-- RETURN / EXCHANGE DETAIL MODAL -->
+  <div id="return-detail-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <button type="button" class="modal-close-btn" id="return-modal-close">&times;</button>
+      <div id="return-modal-body">
+        <!-- Populated dynamically by admin.js -->
+      </div>
+    </div>
   </div>
 
   <!-- Core Dashboard JS Script -->

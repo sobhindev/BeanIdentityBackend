@@ -46,6 +46,22 @@ const validateReturnRules = [
       }
       return true;
     }),
+
+  body("productId")
+    .custom((value, { req }) => {
+      if (req.body.type === "exchange" && (!value || String(value).trim() === "")) {
+        throw new Error("Please select which product line item you want to exchange.");
+      }
+      return true;
+    }),
+
+  body("variantId")
+    .custom((value, { req }) => {
+      if (req.body.type === "exchange" && (!value || String(value).trim() === "")) {
+        throw new Error("Please select which product line item you want to exchange.");
+      }
+      return true;
+    }),
 ];
 
 const validateReturn = (req, res, next) => {
