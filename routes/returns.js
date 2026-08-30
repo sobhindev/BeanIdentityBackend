@@ -12,6 +12,60 @@ const adminAuth = require("../middleware/adminAuth");
 const { uploadToCloudinary } = require("../utils/cloudinary");
 const sendNotification = require("../services/notificationService");
 const { getShopifyToken } = require("../utils/shopifyAuth");
+const { findOrderByNameAndEmail } = require("../services/shopifyService");
+
+// Route 0: GET /api/returns/order-lookup
+// Verifies an order number + email against Shopify and returns its line items so the
+// storefront request form can let the customer pick the exact item to return/exchange,
+// instead of asking them to type in a product/size/date by hand.
+router.get("/order-lookup", async (req, res) => {
+  try {
+    const { orderNumber, email } = req.query;
+
+    if (!orderNumber || !email) {
+      return res.status(400).json({
+        error: "Both orderNumber and email are required.",
+      });
+    }
+
+    const result = await findOrderByNameAndEmail(orderNumber, email);
+
+    if (!result) {
+      return res.status(404).json({
+        error: "We couldn't find an order with that number. Please double-check and try again.",
+      });
+    }
+
+    if (result.mismatch) {
+      return res.status(403).json({
+        error: "That email address doesn't match the one used to place this order.",
+      });
+    }
+
+    const referenceDate = result.fulfillmentDate || result.createdAt;
+    let eligible = true;
+    let diffDays = null;
+    if (referenceDate) {
+      diffDays = (Date.now() - new Date(referenceDate).getTime()) / (1000 * 60 * 60 * 24);
+      eligible = diffDays <= 5;
+    }
+
+    return res.json({
+      orderName: result.orderName,
+      customerName: result.customerName || "",
+      referenceDate,
+      eligible,
+      daysSinceDelivery: diffDays !== null ? Math.floor(diffDays) : null,
+      lineItems: result.lineItems,
+    });
+  } catch (error) {
+    console.error("Error looking up order for return/exchange:", error);
+    return res.status(502).json({
+      error: "Failed to verify this order with Shopify. Please try again shortly.",
+      detail: error.message,
+    });
+  }
+});
 
 // Route 1: POST /api/returns/submit
 router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
@@ -26,12 +80,49 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
       reason,
       reasonDetail,
       exchangeSize,
+      lineItemId,
+      productId,
+      variantId,
+      productTitle,
+      currentVariantTitle,
+      exchangeVariantId,
     } = req.body;
 
-    // 1. Server-side 5-day window enforcement
+    // 1. Verify the order against Shopify so the 5-day window is measured against a real
+    //    fulfillment date rather than whatever date the customer types in. If Shopify can't
+    //    be reached, or the order predates the app / was placed as a draft, we fall back to
+    //    the customer-supplied date and flag the request as unverified for admin review.
+    let deliveryReferenceDate = new Date(orderDeliveryDate);
+    let orderVerified = false;
+    let shopifyOrderName = orderId;
+
+    try {
+      const orderResult = await findOrderByNameAndEmail(orderId, customerEmail);
+
+      if (orderResult && orderResult.mismatch) {
+        return res.status(403).json({
+          error: "The order ID and email address don't match our records.",
+        });
+      }
+
+      if (orderResult) {
+        orderVerified = true;
+        shopifyOrderName = orderResult.orderName;
+        const referenceDate = orderResult.fulfillmentDate || orderResult.createdAt;
+        if (referenceDate) {
+          deliveryReferenceDate = new Date(referenceDate);
+        }
+      }
+    } catch (lookupError) {
+      console.warn(
+        "[Returns] Shopify order verification unavailable, falling back to submitted delivery date:",
+        lookupError.message
+      );
+    }
+
+    // 2. Server-side 5-day window enforcement (never trust the client alone for this)
     const today = new Date();
-    const deliveryDate = new Date(orderDeliveryDate);
-    const diffTimeMs = today.getTime() - deliveryDate.getTime();
+    const diffTimeMs = today.getTime() - deliveryReferenceDate.getTime();
     const diffDays = diffTimeMs / (1000 * 60 * 60 * 24);
 
     if (diffDays > 5) {
@@ -40,7 +131,7 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
       });
     }
 
-    // 2. Media validation for returns
+    // 3. Media validation for returns
     if (type === "return") {
       const imagesCount = req.files && req.files.images ? req.files.images.length : 0;
       const videoCount = req.files && req.files.video ? req.files.video.length : 0;
@@ -57,7 +148,7 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
       }
     }
 
-    // 3. Upload media to Cloudinary
+    // 4. Upload media to Cloudinary
     let imageUrls = [];
     let videoUrl = "";
 
@@ -81,9 +172,11 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
       });
     }
 
-    // 4. Save Return Request to MongoDB
+    // 5. Save Return Request to MongoDB
     const returnRequest = new Return({
       orderId,
+      shopifyOrderName,
+      orderVerified,
       customerName,
       customerEmail,
       customerPhone,
@@ -92,6 +185,12 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
       reason,
       reasonDetail,
       exchangeSize,
+      lineItemId,
+      productId,
+      variantId,
+      productTitle,
+      currentVariantTitle,
+      exchangeVariantId,
       media: {
         images: imageUrls,
         video: videoUrl,
@@ -102,13 +201,19 @@ router.post("/submit", uploadMiddleware, validateReturn, async (req, res) => {
 
     await returnRequest.save();
 
-    // 5. Send customer receipt email notification
-    await sendNotification(customerEmail, customerName, "request_received", {});
+    // 6. Send customer receipt email notification
+    await sendNotification(customerEmail, customerName, "request_received", {
+      type,
+      productTitle,
+    });
 
-    // 6. Return response
+    // 7. Return response
     return res.status(201).json({
       success: true,
-      message: "If the returned product passes our quality check parameters based on the photos submitted, the refund will be processed within 5–6 business days.",
+      message:
+        type === "exchange"
+          ? "We've received your exchange request. If it passes our quality check, we'll confirm your replacement size within 5–6 business days."
+          : "If the returned product passes our quality check parameters based on the photos submitted, the refund will be processed within 5–6 business days.",
       requestId: returnRequest._id,
     });
   } catch (error) {
@@ -228,7 +333,10 @@ router.patch("/admin/:requestId/review", adminAuth, async (req, res) => {
           returnRequest.customerEmail,
           returnRequest.customerName,
           "exchange_confirmed",
-          { exchangeSize: returnRequest.exchangeSize }
+          {
+            exchangeSize: returnRequest.exchangeSize,
+            productTitle: returnRequest.productTitle,
+          }
         );
       } else {
         await sendNotification(
@@ -261,6 +369,43 @@ router.patch("/admin/:requestId/review", adminAuth, async (req, res) => {
   }
 });
 
+// Route 5b: PATCH /api/returns/admin/:requestId/fulfillment
+// Lets staff mark an approved request as fulfilled once they've manually processed the
+// refund or shipped the replacement item outside this system. Exchanges are fully manual
+// today (no automatic Shopify order is created), so this is how a request leaves "approved"
+// and stops showing as outstanding work.
+router.patch("/admin/:requestId/fulfillment", adminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const allowedStatuses = ["refund_initiated", "completed"];
+
+    if (!status || !allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        error: `Invalid status. Must be one of: ${allowedStatuses.join(", ")}.`,
+      });
+    }
+
+    const returnRequest = await Return.findById(req.params.requestId);
+    if (!returnRequest) {
+      return res.status(404).json({ error: "Return request not found" });
+    }
+
+    if (returnRequest.status !== "approved" && returnRequest.status !== "refund_initiated") {
+      return res.status(400).json({
+        error: "Only an approved request can be marked as refund_initiated or completed.",
+      });
+    }
+
+    returnRequest.status = status;
+    await returnRequest.save();
+
+    return res.json(returnRequest);
+  } catch (error) {
+    console.error("Error updating return fulfillment status:", error);
+    return res.status(500).json({ error: "Internal server error occurred." });
+  }
+});
+
 // Route 6: GET /api/returns/sizes/:productId
 router.get('/sizes/:productId', async (req, res) => {
   try {
@@ -275,13 +420,17 @@ router.get('/sizes/:productId', async (req, res) => {
       }
     );
 
-    const availableSizes = response.data.variants
-      .filter(v => v.inventory_quantity > 0)
-      .map(v => v.title);
+    const inStockVariants = response.data.variants.filter(v => v.inventory_quantity > 0);
+
+    const availableSizes = inStockVariants.map(v => v.title);
+    // Also expose variant IDs alongside their titles so the exchange flow can record
+    // precisely which variant the customer wants, not just a free-text size label.
+    const availableVariants = inStockVariants.map(v => ({ id: v.id, title: v.title }));
 
     res.json({
       productId: req.params.productId,
-      availableSizes
+      availableSizes,
+      availableVariants
     });
 
   } catch (error) {

@@ -24,19 +24,27 @@ const sendNotification = async (customerEmail, customerName, event, extraData = 
     let htmlContent = "";
 
     switch (event) {
-      case "request_received":
-        subject = "We've received your return request — Bean Identity";
+      case "request_received": {
+        const isExchange = extraData.type === "exchange";
+        const productLine = extraData.productTitle
+          ? `<p>Item: <strong>${extraData.productTitle}</strong></p>`
+          : "";
+        subject = isExchange
+          ? "We've received your exchange request — Bean Identity"
+          : "We've received your return request — Bean Identity";
         htmlContent = `
           <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee;">
             <h2 style="color: #000; border-bottom: 2px solid #000; padding-bottom: 10px;">Hello ${customerName},</h2>
-            <p>We have successfully received your return/exchange request.</p>
-            <p>If the returned product passes our quality check parameters based on the photos and details submitted, the refund/exchange will be processed within <strong>5–6 business days</strong>.</p>
+            <p>We have successfully received your ${isExchange ? "exchange" : "return"} request.</p>
+            ${productLine}
+            <p>If the returned product passes our quality check parameters based on the photos and details submitted, the ${isExchange ? "exchange" : "refund"} will be processed within <strong>5–6 business days</strong>.</p>
             <p>Thank you for choosing <strong>Bean Identity</strong>.</p>
             <hr style="border: 0; border-top: 1px solid #ccc; margin: 20px 0;" />
             <p style="font-size: 0.8em; color: #777; text-align: center;">This is an automated email from Bean Identity Support. Please do not reply directly.</p>
           </div>
         `;
         break;
+      }
 
       case "return_approved":
         subject = "Your return has been approved — Bean Identity";
@@ -73,10 +81,14 @@ const sendNotification = async (customerEmail, customerName, event, extraData = 
       case "exchange_confirmed":
         subject = "Your exchange request is confirmed — Bean Identity";
         const exchangeSize = extraData.exchangeSize || "N/A";
+        const exchangeProductLine = extraData.productTitle
+          ? `<p>Item: <strong>${extraData.productTitle}</strong></p>`
+          : "";
         htmlContent = `
           <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee;">
             <h2 style="color: #000; border-bottom: 2px solid #000; padding-bottom: 10px;">Hello ${customerName},</h2>
             <p>Great news! Your exchange request is <strong>confirmed</strong>.</p>
+            ${exchangeProductLine}
             <p>We are preparing your replacement order in size <strong>${exchangeSize}</strong>, which will be dispatched shortly.</p>
             <p>Thank you for choosing <strong>Bean Identity</strong>.</p>
             <hr style="border: 0; border-top: 1px solid #ccc; margin: 20px 0;" />

@@ -21,9 +21,24 @@ document.addEventListener("DOMContentLoaded", () => {
   const storiesSubTabs = document.querySelectorAll(".sub-tab");
   const storiesGrid = document.getElementById("stories-grid");
 
+  // Returns & Exchanges Module DOM Elements
+  const returnsTbody = document.getElementById("returns-tbody");
+  const returnsFilterStatus = document.getElementById("returns-filter-status");
+  const returnsFilterType = document.getElementById("returns-filter-type");
+  const returnsFilterOrderId = document.getElementById("returns-filter-orderid");
+  const returnsRefreshBtn = document.getElementById("returns-refresh-btn");
+  const returnsLoadMoreBtn = document.getElementById("returns-load-more-btn");
+  const returnDetailModal = document.getElementById("return-detail-modal");
+  const returnModalBody = document.getElementById("return-modal-body");
+  const returnModalCloseBtn = document.getElementById("return-modal-close");
+
   // State Management
   let activeTab = "stories";
   let activeStoriesSubTab = "pending";
+
+  // Returns & Exchanges State Management
+  let currentReturnsPage = 1;
+  let returnsOrderIdDebounce;
 
   // Quiz Analytics State Management
   let currentParticipantsPage = 1;
@@ -135,6 +150,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const loadModuleData = (tabName) => {
     if (tabName === "stories") {
       loadStories();
+    } else if (tabName === "returns") {
+      loadReturnsStats();
+      loadReturns(true);
     } else if (tabName === "quiz") {
       loadAnalytics(true);
     }
@@ -462,6 +480,389 @@ document.addEventListener("DOMContentLoaded", () => {
       alert("Error connecting to server to save moderation review.");
     }
   };
+
+  // ==========================================================================
+  // RETURNS & EXCHANGES MODULE CONTROLLER
+  // ==========================================================================
+
+  const RETURNS_STATUS_LABELS = {
+    pending_review: "Pending Review",
+    approved: "Approved",
+    rejected: "Rejected",
+    refund_initiated: "Refund Initiated",
+    completed: "Completed",
+  };
+
+  const formatReturnDate = (dateStr) => {
+    if (!dateStr) return "—";
+    return new Date(dateStr).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  };
+
+  // Update the four summary metric cards at the top of the Returns tab
+  const loadReturnsStats = async () => {
+    if (!adminSecretKey) return;
+    try {
+      const headers = { "x-admin-key": adminSecretKey };
+      const [pendingRes, approvedRes, rejectedRes, exchangeRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/returns/admin/all?status=pending_review&limit=1`, { headers }),
+        fetch(`${BACKEND_URL}/api/returns/admin/all?status=approved&limit=1`, { headers }),
+        fetch(`${BACKEND_URL}/api/returns/admin/all?status=rejected&limit=1`, { headers }),
+        fetch(`${BACKEND_URL}/api/returns/admin/all?type=exchange&limit=1`, { headers }),
+      ]);
+
+      if (pendingRes.ok) {
+        const d = await pendingRes.json();
+        document.getElementById("returns-pending-badge").textContent = d.total;
+      }
+      if (approvedRes.ok) {
+        const d = await approvedRes.json();
+        document.getElementById("returns-approved-badge").textContent = d.total;
+      }
+      if (rejectedRes.ok) {
+        const d = await rejectedRes.json();
+        document.getElementById("returns-rejected-badge").textContent = d.total;
+      }
+      if (exchangeRes.ok) {
+        const d = await exchangeRes.json();
+        document.getElementById("returns-exchange-badge").textContent = d.total;
+      }
+    } catch (err) {
+      console.warn("Could not retrieve returns statistics", err);
+    }
+  };
+
+  // Fetch and render the returns/exchanges table, respecting the active filters
+  const loadReturns = async (clearList = true) => {
+    if (clearList) {
+      currentReturnsPage = 1;
+      returnsTbody.innerHTML = `
+        <tr>
+          <td colspan="8" style="text-align: center; padding: 48px;">
+            <div class="skeleton-loader">
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+            </div>
+          </td>
+        </tr>
+      `;
+      returnsLoadMoreBtn.style.display = "none";
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set("page", currentReturnsPage);
+      params.set("limit", 20);
+      if (returnsFilterStatus.value) params.set("status", returnsFilterStatus.value);
+      if (returnsFilterType.value) params.set("type", returnsFilterType.value);
+      if (returnsFilterOrderId.value.trim()) params.set("orderId", returnsFilterOrderId.value.trim());
+
+      const response = await fetch(`${BACKEND_URL}/api/returns/admin/all?${params.toString()}`, {
+        headers: { "x-admin-key": adminSecretKey },
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          logoutButton.click();
+          return;
+        }
+        returnsTbody.innerHTML = `<tr><td colspan="8" class="error-state">Failed to fetch requests (HTTP ${response.status})</td></tr>`;
+        return;
+      }
+
+      const data = await response.json();
+      const requests = data.requests || [];
+
+      if (clearList) returnsTbody.innerHTML = "";
+
+      if (requests.length === 0 && currentReturnsPage === 1) {
+        returnsTbody.innerHTML = `
+          <tr>
+            <td colspan="8" class="empty-state">No return or exchange requests match these filters.</td>
+          </tr>
+        `;
+      } else {
+        requests.forEach((r) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td style="font-weight: 600;" title="${r._id}">${r._id.slice(-8).toUpperCase()}</td>
+            <td>${escapeHtml(r.shopifyOrderName || r.orderId)}</td>
+            <td>
+              <div>${escapeHtml(r.customerName)}</div>
+              <div style="color: var(--text-muted); font-size: 11px;">${escapeHtml(r.customerEmail)}</div>
+            </td>
+            <td><span class="type-pill ${r.type}">${r.type}</span></td>
+            <td style="color: var(--text-muted); max-width: 180px;">${escapeHtml(r.reason)}</td>
+            <td style="color: var(--text-muted);">${formatReturnDate(r.createdAt)}</td>
+            <td><span class="status-pill ${r.status}">${RETURNS_STATUS_LABELS[r.status] || r.status}</span></td>
+            <td><button type="button" class="view-detail-btn" data-id="${r._id}">VIEW</button></td>
+          `;
+          returnsTbody.appendChild(tr);
+        });
+      }
+
+      // Pagination
+      const totalPages = Math.max(1, Math.ceil(data.total / data.limit));
+      returnsLoadMoreBtn.style.display = currentReturnsPage < totalPages ? "block" : "none";
+
+      // Bind view buttons
+      returnsTbody.querySelectorAll(".view-detail-btn").forEach((btn) => {
+        btn.addEventListener("click", () => openReturnDetail(btn.getAttribute("data-id")));
+      });
+    } catch (err) {
+      console.error(err);
+      returnsTbody.innerHTML = `<tr><td colspan="8" class="error-state">Error connecting to server. Please try again.</td></tr>`;
+    }
+  };
+
+  // Open the detail modal for a single return/exchange request
+  const openReturnDetail = async (requestId) => {
+    returnModalBody.innerHTML = `
+      <div class="skeleton-loader">
+        <div class="skeleton-bar"></div>
+        <div class="skeleton-bar"></div>
+        <div class="skeleton-bar"></div>
+      </div>
+    `;
+    returnDetailModal.style.display = "flex";
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/returns/admin/${requestId}`, {
+        headers: { "x-admin-key": adminSecretKey },
+      });
+
+      if (!response.ok) {
+        returnModalBody.innerHTML = `<div class="error-state">Failed to load request details (HTTP ${response.status})</div>`;
+        return;
+      }
+
+      const r = await response.json();
+      renderReturnDetail(r);
+    } catch (err) {
+      console.error(err);
+      returnModalBody.innerHTML = `<div class="error-state">Error connecting to server.</div>`;
+    }
+  };
+
+  const renderReturnDetail = (r) => {
+    const isExchange = r.type === "exchange";
+
+    let mediaMarkup = "";
+    const hasImages = r.media && r.media.images && r.media.images.length > 0;
+    const hasVideo = r.media && r.media.video;
+    if (hasImages || hasVideo) {
+      mediaMarkup = `
+        <div class="detail-section-title">EVIDENCE MEDIA</div>
+        <div class="detail-media-grid">
+          ${hasImages ? r.media.images.map((img) => `<img src="${img}" alt="Return evidence" onclick="window.open('${img}', '_blank')">`).join("") : ""}
+          ${hasVideo ? `<div class="video-cell"><video src="${r.media.video}" controls muted playsinline></video></div>` : ""}
+        </div>
+      `;
+    }
+
+    const unverifiedFlag = !r.orderVerified
+      ? `<div class="unverified-order-flag">⚠ Order could not be auto-verified against Shopify — double-check the order ID and delivery date manually before approving.</div>`
+      : "";
+
+    let actionsMarkup = "";
+    if (r.status === "pending_review") {
+      actionsMarkup = `
+        <div class="form-group" style="margin-top: 20px;">
+          <label for="return-admin-note">ADMIN NOTE (OPTIONAL)</label>
+          <textarea id="return-admin-note" placeholder="Internal note about this request..."></textarea>
+        </div>
+        <div class="form-group" id="rejection-reason-wrapper" style="display: none;">
+          <label for="return-rejection-reason">REJECTION REASON (SHOWN TO CUSTOMER)</label>
+          <textarea id="return-rejection-reason" placeholder="e.g. Product shows signs of wear inconsistent with a manufacturing defect."></textarea>
+        </div>
+        <div class="modal-action-bar">
+          <button type="button" class="card-btn approve" id="return-approve-btn">
+            ${isExchange ? "APPROVE EXCHANGE" : "APPROVE REFUND"}
+          </button>
+          <button type="button" class="card-btn reject" id="return-reject-btn">REJECT</button>
+        </div>
+      `;
+    } else if (r.status === "approved" || r.status === "refund_initiated") {
+      actionsMarkup = `
+        <p style="color: var(--text-muted); font-size: 12px; margin: 16px 0; line-height: 1.5;">
+          This request is approved. Once you've ${isExchange ? "shipped the replacement" : "processed the refund"}
+          outside this system, mark it below so it stops showing as outstanding work.
+        </p>
+        <div class="modal-action-bar">
+          ${r.status === "approved"
+            ? `<button type="button" class="card-btn approve" id="return-mark-refund-btn">MARK REFUND INITIATED</button>`
+            : ""
+          }
+          <button type="button" class="card-btn approve" id="return-mark-complete-btn">MARK COMPLETED</button>
+        </div>
+      `;
+    }
+
+    returnModalBody.innerHTML = `
+      <div class="modal-title">${isExchange ? "Exchange" : "Return"} Request</div>
+      <div class="modal-subtitle">Submitted ${formatReturnDate(r.createdAt)} · <span class="status-pill ${r.status}">${RETURNS_STATUS_LABELS[r.status] || r.status}</span></div>
+
+      ${unverifiedFlag}
+
+      <div class="detail-row"><span class="detail-label">Order</span><span class="detail-value">${escapeHtml(r.shopifyOrderName || r.orderId)}</span></div>
+      <div class="detail-row"><span class="detail-label">Customer</span><span class="detail-value">${escapeHtml(r.customerName)}</span></div>
+      <div class="detail-row"><span class="detail-label">Email</span><span class="detail-value">${escapeHtml(r.customerEmail)}</span></div>
+      ${r.customerPhone ? `<div class="detail-row"><span class="detail-label">Phone</span><span class="detail-value">${escapeHtml(r.customerPhone)}</span></div>` : ""}
+      <div class="detail-row"><span class="detail-label">Delivery Date</span><span class="detail-value">${formatReturnDate(r.orderDeliveryDate)}</span></div>
+      ${r.productTitle ? `<div class="detail-row"><span class="detail-label">Item</span><span class="detail-value">${escapeHtml(r.productTitle)}${r.currentVariantTitle ? ` (${escapeHtml(r.currentVariantTitle)})` : ""}</span></div>` : ""}
+      ${isExchange ? `<div class="detail-row"><span class="detail-label">Requested Size</span><span class="detail-value">${escapeHtml(r.exchangeSize || "—")}</span></div>` : ""}
+
+      <div class="detail-section-title">REASON</div>
+      <div class="detail-reason-text">
+        <strong>${escapeHtml(r.reason)}</strong>
+        ${r.reasonDetail ? `<div style="margin-top: 8px; color: var(--text-muted);">${escapeHtml(r.reasonDetail)}</div>` : ""}
+      </div>
+
+      ${mediaMarkup}
+
+      ${r.adminNote ? `<div class="detail-section-title">ADMIN NOTE</div><div class="detail-reason-text">${escapeHtml(r.adminNote)}</div>` : ""}
+      ${r.status === "rejected" && r.rejectionReason ? `<div class="detail-section-title">REJECTION REASON</div><div class="detail-reason-text">${escapeHtml(r.rejectionReason)}</div>` : ""}
+
+      ${actionsMarkup}
+    `;
+
+    if (r.status === "pending_review") {
+      const approveBtn = document.getElementById("return-approve-btn");
+      const rejectBtn = document.getElementById("return-reject-btn");
+      const rejectionWrapper = document.getElementById("rejection-reason-wrapper");
+
+      approveBtn.addEventListener("click", () => {
+        const adminNote = document.getElementById("return-admin-note").value.trim();
+        reviewReturn(r._id, "approve", { adminNote });
+      });
+
+      rejectBtn.addEventListener("click", () => {
+        // First click reveals the required rejection reason field; second click submits.
+        if (rejectionWrapper.style.display === "none") {
+          rejectionWrapper.style.display = "flex";
+          document.getElementById("return-rejection-reason").focus();
+          rejectBtn.textContent = "CONFIRM REJECTION";
+          return;
+        }
+        const adminNote = document.getElementById("return-admin-note").value.trim();
+        const rejectionReason = document.getElementById("return-rejection-reason").value.trim();
+        if (!rejectionReason) {
+          document.getElementById("return-rejection-reason").focus();
+          return;
+        }
+        reviewReturn(r._id, "reject", { adminNote, rejectionReason });
+      });
+    } else if (r.status === "approved" || r.status === "refund_initiated") {
+      const refundBtn = document.getElementById("return-mark-refund-btn");
+      const completeBtn = document.getElementById("return-mark-complete-btn");
+      if (refundBtn) {
+        refundBtn.addEventListener("click", () => updateFulfillmentStatus(r._id, "refund_initiated"));
+      }
+      if (completeBtn) {
+        completeBtn.addEventListener("click", () => updateFulfillmentStatus(r._id, "completed"));
+      }
+    }
+  };
+
+  // Mark an already-approved request as refund_initiated / completed once staff have
+  // manually processed the refund or shipped the replacement outside this system.
+  const updateFulfillmentStatus = async (requestId, status) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/returns/admin/${requestId}/fulfillment`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": adminSecretKey,
+        },
+        body: JSON.stringify({ status }),
+      });
+
+      if (response.ok) {
+        returnDetailModal.style.display = "none";
+        loadReturnsStats();
+        loadReturns(true);
+      } else {
+        const result = await response.json();
+        alert(result.error || "Failed to update this request.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error connecting to server to save this update.");
+    }
+  };
+
+  // Submit an approve/reject decision to the backend
+  const reviewReturn = async (requestId, action, { adminNote, rejectionReason } = {}) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/returns/admin/${requestId}/review`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": adminSecretKey,
+        },
+        body: JSON.stringify({ action, adminNote, rejectionReason }),
+      });
+
+      if (response.ok) {
+        returnDetailModal.style.display = "none";
+        loadReturnsStats();
+        loadReturns(true);
+      } else {
+        const result = await response.json();
+        alert(result.error || "Failed to update this request.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error connecting to server to save this decision.");
+    }
+  };
+
+  const closeReturnModal = () => {
+    returnDetailModal.style.display = "none";
+  };
+
+  if (returnModalCloseBtn) {
+    returnModalCloseBtn.addEventListener("click", closeReturnModal);
+  }
+  if (returnDetailModal) {
+    returnDetailModal.addEventListener("click", (e) => {
+      if (e.target === returnDetailModal) closeReturnModal();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && returnDetailModal && returnDetailModal.style.display === "flex") {
+      closeReturnModal();
+    }
+  });
+
+  if (returnsFilterStatus) {
+    returnsFilterStatus.addEventListener("change", () => loadReturns(true));
+  }
+  if (returnsFilterType) {
+    returnsFilterType.addEventListener("change", () => loadReturns(true));
+  }
+  if (returnsFilterOrderId) {
+    returnsFilterOrderId.addEventListener("input", () => {
+      clearTimeout(returnsOrderIdDebounce);
+      returnsOrderIdDebounce = setTimeout(() => loadReturns(true), 400);
+    });
+  }
+  if (returnsRefreshBtn) {
+    returnsRefreshBtn.addEventListener("click", () => {
+      loadReturnsStats();
+      loadReturns(true);
+    });
+  }
+  if (returnsLoadMoreBtn) {
+    returnsLoadMoreBtn.addEventListener("click", () => {
+      currentReturnsPage++;
+      loadReturns(false);
+    });
+  }
 
   // ==========================================================================
   // QUIZ ANALYTICS MODULE CONTROLLER
